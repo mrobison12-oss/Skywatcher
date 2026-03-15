@@ -295,6 +295,7 @@
   let currentFrame = 0;
   let radarAnimInterval = null;
   let radarFrameDates = [];
+  let alertPolyLayers = [];
 
   // ── Point-in-polygon (Ray Casting) ────────────────────────────────────────
   function pointInPolygon(lat, lon, polygon) {
@@ -400,6 +401,7 @@
       if (activeAlerts.length === 0) {
         el.innerHTML = `<div class="clear">No active watches, warnings, or advisories.</div>`;
         updateThreatSummary();
+        renderAlertPolygons();
         return;
       }
 
@@ -434,11 +436,13 @@
       }).join('');
 
       updateThreatSummary();
+      renderAlertPolygons();
 
     } catch (err) {
       el.innerHTML = `<div class="error">Alert fetch failed: ${err.message}</div>`;
       activeAlerts = [];
       updateThreatSummary();
+      renderAlertPolygons();
     }
   }
 
@@ -556,6 +560,49 @@
       .replace('Partly ', 'Ptly ').replace('Mostly ', 'Mstly ');
   }
 
+  // ── Alert polygon overlays on map ─────────────────────────────────────────
+  const ALERT_POLY_STYLE = {
+    warning:  { color: '#ef4444', fillColor: '#ef4444', fillOpacity: 0.12, weight: 1.5, opacity: 0.7 },
+    watch:    { color: '#f59e0b', fillColor: '#f59e0b', fillOpacity: 0.10, weight: 1.5, opacity: 0.7 },
+    advisory: { color: '#3b82f6', fillColor: '#3b82f6', fillOpacity: 0.08, weight: 1.5, opacity: 0.7 }
+  };
+
+  function renderAlertPolygons() {
+    if (!radarMap) return;
+
+    // Clear existing alert polygons
+    alertPolyLayers.forEach(l => radarMap.removeLayer(l));
+    alertPolyLayers = [];
+
+    for (const alert of activeAlerts) {
+      const geo = alert.geometry;
+      if (!geo) continue; // zone-based alerts have no polygon
+
+      const cls = alertClass(alert.properties.event);
+      const style = ALERT_POLY_STYLE[cls] || ALERT_POLY_STYLE.advisory;
+
+      // Convert NWS GeoJSON coords [lon, lat] → Leaflet [lat, lon]
+      const toLatLng = ring => ring.map(([lon, lat]) => [lat, lon]);
+
+      let layer;
+      if (geo.type === 'Polygon') {
+        layer = L.polygon(toLatLng(geo.coordinates[0]), style);
+      } else if (geo.type === 'MultiPolygon') {
+        const rings = geo.coordinates.map(poly => toLatLng(poly[0]));
+        layer = L.polygon(rings, style);
+      } else {
+        continue;
+      }
+
+      layer.bindTooltip(alert.properties.event, {
+        sticky: true,
+        className: 'radar-tooltip'
+      });
+      layer.addTo(radarMap);
+      alertPolyLayers.push(layer);
+    }
+  }
+
   // ── Radar map ─────────────────────────────────────────────────────────────
 
   // Build 6 UTC timestamps at 5-min intervals, oldest→newest
@@ -587,12 +634,24 @@
       attributionControl: true
     });
 
-    // Dark base: CartoDB Dark Matter
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    // Dark base: CartoDB Dark Matter (no labels — county overlay adds context)
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png', {
       subdomains: 'abcd',
       maxZoom: 13,
       attribution: '&copy; <a href="https://carto.com/">CARTO</a> &copy; <a href="https://www.openstreetmap.org/">OSM</a>'
     }).addTo(radarMap);
+
+    // County + state outlines (IEM, zIndex below radar)
+    L.tileLayer(
+      'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/usnws_county/{z}/{x}/{y}.png',
+      { opacity: 0.35, zIndex: 100 }
+    ).addTo(radarMap);
+
+    // State boundaries slightly brighter
+    L.tileLayer(
+      'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/usnws_state/{z}/{x}/{y}.png',
+      { opacity: 0.5, zIndex: 101 }
+    ).addTo(radarMap);
 
     // 25-mile range ring (25 mi = 40,234 m)
     L.circle([LAT, LON], {
