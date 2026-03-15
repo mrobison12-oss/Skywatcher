@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SkyWatcher</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -19,7 +21,7 @@
     /* ── Grid layout ─────────────────────────────────────────── */
     .dashboard {
       display: grid;
-      grid-template-columns: 35fr 35fr 30fr;
+      grid-template-columns: 30fr 40fr 30fr;
       grid-template-rows: auto 1fr;
       height: 100vh;
       gap: 0;
@@ -85,16 +87,77 @@
       font-size: 10px; color: #86efac; display: inline-block; margin-top: 0.35rem;
     }
 
-    /* ── Status panel (center column) ────────────────────────── */
-    .status-card {
-      background: #1e293b;
-      padding: 0.75rem;
-      border-radius: 4px;
-      margin-bottom: 0.5rem;
+    /* ── Center column: radar map ────────────────────────────── */
+    .col-radar {
+      display: flex;
+      flex-direction: column;
+      padding: 0;
+      border-right: 1px solid #1e293b;
+      overflow: hidden;
     }
-    .status-card .label { color: #64748b; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.25rem; }
-    .status-card .value { color: #7dd3fc; font-size: 13px; }
-    .status-card .value strong { color: #38bdf8; }
+
+    .col-radar .col-header {
+      padding: 0.5rem 0.75rem;
+      margin-bottom: 0;
+      border-bottom: 1px solid #1e293b;
+      flex-shrink: 0;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+    }
+
+    .radar-meta {
+      display: flex;
+      gap: 1.25rem;
+      padding: 0.4rem 0.75rem;
+      border-bottom: 1px solid #1e293b;
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    .radar-meta-item { display: flex; gap: 0.35rem; align-items: baseline; }
+    .radar-meta-item .label { color: #64748b; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+    .radar-meta-item .value { color: #7dd3fc; font-size: 11px; }
+    .radar-meta-item .value strong { color: #38bdf8; }
+
+    #radar-map {
+      flex: 1;
+      min-height: 0;
+    }
+
+    .radar-footer {
+      padding: 0.3rem 0.75rem;
+      border-top: 1px solid #1e293b;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-shrink: 0;
+    }
+    .radar-footer .radar-legend { display: flex; gap: 0.6rem; align-items: center; font-size: 10px; color: #64748b; }
+    .legend-swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; vertical-align: middle; }
+
+    /* Leaflet overrides for dark theme */
+    .leaflet-control-attribution {
+      background: rgba(15,23,42,0.75) !important;
+      color: #475569 !important;
+      font-size: 9px !important;
+    }
+    .leaflet-control-attribution a { color: #64748b !important; }
+    .leaflet-control-zoom a {
+      background: #1e293b !important;
+      color: #94a3b8 !important;
+      border-color: #334155 !important;
+    }
+    .leaflet-control-zoom a:hover {
+      background: #334155 !important;
+      color: #e2e8f0 !important;
+    }
+    .radar-tooltip {
+      background: #1e293b !important;
+      border: 1px solid #334155 !important;
+      color: #94a3b8 !important;
+      font-family: monospace !important;
+      font-size: 11px !important;
+    }
 
     /* ── Timeline ────────────────────────────────────────────── */
     .timeline-col {
@@ -132,6 +195,15 @@
     .timeline-bar.advisory { background: #3b82f6; }
     .timeline-bar.precip { background: #475569; }
 
+    /* ── Threat bar (right column) ───────────────────────────── */
+    .threat-bar {
+      background: #1e293b;
+      padding: 0.5rem 0.5rem;
+      border-radius: 4px;
+      margin-bottom: 0.75rem;
+      font-size: 12px;
+    }
+
     /* ── Error / Loading ─────────────────────────────────────── */
     .error {
       background: #2d1515; border-left: 4px solid #ef4444;
@@ -139,7 +211,7 @@
     }
     .loading { color: #64748b; font-size: 12px; }
 
-    /* ── Portrait fallback (stack columns) ───────────────────── */
+    /* ── Portrait fallback ───────────────────────────────────── */
     @media (max-width: 700px) {
       .dashboard {
         grid-template-columns: 1fr;
@@ -148,6 +220,7 @@
         overflow-y: auto;
       }
       .col { border-right: none; border-bottom: 1px solid #1e293b; }
+      .col-radar { border-right: none; border-bottom: 1px solid #1e293b; height: 340px; }
       body { overflow: auto; }
     }
   </style>
@@ -159,7 +232,7 @@
   <div class="header">
     <div>
       <h1 style="display:inline">SkyWatcher</h1>
-      <span class="phase">Phase 2</span>
+      <span class="phase">Phase 3</span>
     </div>
     <div class="timestamp" id="timestamp">Loading...</div>
   </div>
@@ -170,29 +243,40 @@
     <div id="alerts" class="loading">Fetching alerts...</div>
   </div>
 
-  <!-- Center Column: Status & Info -->
-  <div class="col" id="col-status">
-    <div class="col-header">Status</div>
-
-    <div class="status-card">
-      <div class="label">Home Location</div>
-      <div class="value">42.3469875, -85.7213594<br><span style="color:#64748b;font-size:11px">Alamo Township, MI</span></div>
+  <!-- Center Column: Radar Map -->
+  <div class="col-radar" id="col-radar">
+    <div class="col-header">
+      <span>Radar <span style="color:#475569;font-weight:normal;font-size:10px">NEXRAD N0Q</span></span>
+      <span id="radar-frame-indicator" style="color:#475569;font-size:10px"></span>
     </div>
 
-    <div class="status-card">
-      <div class="label">NWS Grid</div>
-      <div class="value" id="grid-info"><span class="loading">Fetching...</span></div>
+    <div class="radar-meta">
+      <div class="radar-meta-item">
+        <span class="label">NWS Grid</span>
+        <span class="value" id="grid-info"><span class="loading">...</span></span>
+      </div>
+      <div class="radar-meta-item">
+        <span class="label">Threat</span>
+        <span class="value" id="threat-summary"><span class="loading">...</span></span>
+      </div>
     </div>
 
-    <div class="status-card">
-      <div class="label">Threat Summary</div>
-      <div class="value" id="threat-summary"><span class="loading">Calculating...</span></div>
+    <div id="radar-map"></div>
+
+    <div class="radar-footer">
+      <div class="radar-legend">
+        <span class="legend-swatch" style="background:#38bdf8;opacity:0.8"></span>&nbsp;Home
+        &nbsp;&nbsp;
+        <span class="legend-swatch" style="border:1px dashed #38bdf8;background:transparent"></span>&nbsp;25 mi
+      </div>
+      <div style="color:#475569;font-size:10px" id="radar-timestamp"></div>
     </div>
   </div>
 
-  <!-- Right Column: Timeline -->
+  <!-- Right Column: Threat Summary + Timeline -->
   <div class="col timeline-col" id="col-timeline">
     <div class="col-header">24-Hour Threat Timeline</div>
+    <div class="threat-bar" id="threat-bar" style="display:none"></div>
     <div id="timeline" class="loading">Fetching forecast...</div>
   </div>
 </div>
@@ -202,11 +286,15 @@
   const LON = -85.7213594;
   const NWS_USER_AGENT = 'SkyWatcher/1.0 (skywatcher-app)';
 
-  // Cache grid info so we only fetch once (it never changes)
   let gridCache = null;
-
-  // Store alerts globally so timeline can reference them
   let activeAlerts = [];
+
+  // ── Radar state ───────────────────────────────────────────────────────────
+  let radarMap = null;
+  let radarLayers = [];
+  let currentFrame = 0;
+  let radarAnimInterval = null;
+  let radarFrameDates = [];
 
   // ── Point-in-polygon (Ray Casting) ────────────────────────────────────────
   function pointInPolygon(lat, lon, polygon) {
@@ -261,7 +349,6 @@
       const effective = new Date(p.effective || p.sent);
       const expires = p.expires ? new Date(p.expires) : new Date(effective.getTime() + 86400000);
 
-      // Check if alert overlaps this hour
       if (effective < hourEnd && expires > hourStart) {
         const cls = alertClass(p.event);
         if (highest === null || severityOrder[cls] < severityOrder[highest]) {
@@ -276,10 +363,7 @@
   async function fetchGridInfo() {
     const el = document.getElementById('grid-info');
     try {
-      if (gridCache) {
-        renderGrid(el, gridCache);
-        return gridCache;
-      }
+      if (gridCache) { renderGrid(el, gridCache); return gridCache; }
       const res = await fetch(
         `https://api.weather.gov/points/${LAT},${LON}`,
         { headers: { 'User-Agent': NWS_USER_AGENT, 'Accept': 'application/geo+json' } }
@@ -296,11 +380,9 @@
   }
 
   function renderGrid(el, p) {
-    el.innerHTML = `
-      Office: <strong>${p.cwa}</strong> &nbsp;|&nbsp;
-      Grid: ${p.gridX}, ${p.gridY}<br>
-      Zone: ${p.forecastZone?.split('/').pop() || 'N/A'} &nbsp;|&nbsp;
-      County: ${p.county?.split('/').pop() || 'N/A'}`;
+    el.innerHTML =
+      `<strong>${p.cwa}</strong> ${p.gridX},${p.gridY} &nbsp;|&nbsp; ` +
+      `Zone ${p.forecastZone?.split('/').pop() || 'N/A'}`;
   }
 
   // ── Fetch active alerts ───────────────────────────────────────────────────
@@ -360,16 +442,19 @@
     }
   }
 
-  // ── Threat summary (center column) ────────────────────────────────────────
+  // ── Threat summary ────────────────────────────────────────────────────────
   function updateThreatSummary() {
-    const el = document.getElementById('threat-summary');
+    const el  = document.getElementById('threat-summary');
+    const bar = document.getElementById('threat-bar');
+
     if (activeAlerts.length === 0) {
-      el.innerHTML = '<span style="color:#86efac">All clear — no active alerts</span>';
+      el.innerHTML = '<span style="color:#86efac">All clear</span>';
+      if (bar) bar.style.display = 'none';
       return;
     }
 
-    const warnings = activeAlerts.filter(a => alertClass(a.properties.event) === 'warning').length;
-    const watches  = activeAlerts.filter(a => alertClass(a.properties.event) === 'watch').length;
+    const warnings   = activeAlerts.filter(a => alertClass(a.properties.event) === 'warning').length;
+    const watches    = activeAlerts.filter(a => alertClass(a.properties.event) === 'watch').length;
     const advisories = activeAlerts.filter(a => alertClass(a.properties.event) === 'advisory').length;
 
     const parts = [];
@@ -377,7 +462,9 @@
     if (watches)    parts.push(`<span style="color:#f59e0b">${watches} watch${watches > 1 ? 'es' : ''}</span>`);
     if (advisories) parts.push(`<span style="color:#3b82f6">${advisories} advisory</span>`);
 
-    el.innerHTML = parts.join(' &nbsp; ');
+    const joined = parts.join(' &nbsp;');
+    el.innerHTML = joined;
+    if (bar) { bar.style.display = 'block'; bar.innerHTML = joined; }
   }
 
   // ── Fetch hourly forecast ─────────────────────────────────────────────────
@@ -385,7 +472,7 @@
     try {
       const gridX = gridProps ? gridProps.gridX : 41;
       const gridY = gridProps ? gridProps.gridY : 19;
-      const cwa = gridProps ? gridProps.cwa : 'GRR';
+      const cwa   = gridProps ? gridProps.cwa   : 'GRR';
 
       const res = await fetch(
         `https://api.weather.gov/gridpoints/${cwa}/${gridX},${gridY}/forecast/hourly`,
@@ -405,30 +492,18 @@
     const now = new Date();
     const currentHour = now.getHours();
 
-    // If forecast fetch failed, render alert-only timeline
     if (!periods) {
       renderAlertOnlyTimeline(el, now, currentHour);
       return;
     }
 
-    // Take first 24 periods
     const hours = periods.slice(0, 24);
-
     el.innerHTML = hours.map((period, i) => {
       const startTime = new Date(period.startTime);
-      const hour = startTime.getHours();
       const isNow = i === 0;
-
-      // Format hour label
-      const hourLabel = isNow ? 'NOW' : formatHourLabel(hour);
-
-      // Temperature
+      const hourLabel = isNow ? 'NOW' : formatHourLabel(startTime.getHours());
       const temp = `${period.temperature}°`;
-
-      // Short condition
       const cond = shortenCondition(period.shortForecast);
-
-      // Determine bar color: alert severity wins, else precip check
       const severity = alertSeverityAtHour(startTime);
       let barClass = '';
       if (severity) {
@@ -436,7 +511,6 @@
       } else if (period.probabilityOfPrecipitation?.value >= 30) {
         barClass = 'precip';
       }
-
       return `
         <div class="timeline-row ${isNow ? 'now' : ''}">
           <div class="timeline-hour">${hourLabel}</div>
@@ -447,18 +521,15 @@
     }).join('');
   }
 
-  // Fallback: alert-only timeline when hourly forecast fails
   function renderAlertOnlyTimeline(el, now, currentHour) {
     let html = '';
     for (let i = 0; i < 24; i++) {
       const hourTime = new Date(now);
       hourTime.setMinutes(0, 0, 0);
       hourTime.setHours(currentHour + i);
-      const hour = hourTime.getHours();
       const isNow = i === 0;
-      const hourLabel = isNow ? 'NOW' : formatHourLabel(hour);
+      const hourLabel = isNow ? 'NOW' : formatHourLabel(hourTime.getHours());
       const severity = alertSeverityAtHour(hourTime);
-
       html += `
         <div class="timeline-row ${isNow ? 'now' : ''}">
           <div class="timeline-hour">${hourLabel}</div>
@@ -471,24 +542,139 @@
   }
 
   function formatHourLabel(hour) {
-    if (hour === 0) return '12 AM';
+    if (hour === 0)  return '12 AM';
     if (hour === 12) return '12 PM';
     return hour > 12 ? `${hour - 12} PM` : `${hour} AM`;
   }
 
   function shortenCondition(forecast) {
     if (!forecast) return '—';
-    // Shorten common NWS phrases
     return forecast
-      .replace('Chance ', '')
-      .replace('Slight ', '')
-      .replace('Isolated ', '')
-      .replace('Scattered ', 'Sct ')
-      .replace('Thunderstorms', 'T-Storms')
-      .replace('Showers And ', '')
-      .replace(' then ', '/')
-      .replace('Partly ', 'Ptly ')
-      .replace('Mostly ', 'Mstly ');
+      .replace('Chance ', '').replace('Slight ', '').replace('Isolated ', '')
+      .replace('Scattered ', 'Sct ').replace('Thunderstorms', 'T-Storms')
+      .replace('Showers And ', '').replace(' then ', '/')
+      .replace('Partly ', 'Ptly ').replace('Mostly ', 'Mstly ');
+  }
+
+  // ── Radar map ─────────────────────────────────────────────────────────────
+
+  // Build 6 UTC timestamps at 5-min intervals, oldest→newest
+  function getRadarFrames() {
+    const now = new Date();
+    const utcMin = Math.floor(now.getUTCMinutes() / 5) * 5;
+    const base = new Date(Date.UTC(
+      now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
+      now.getUTCHours(), utcMin, 0
+    ));
+    const pad = n => String(n).padStart(2, '0');
+    const fmt = t =>
+      `${t.getUTCFullYear()}${pad(t.getUTCMonth() + 1)}${pad(t.getUTCDate())}` +
+      `${pad(t.getUTCHours())}${pad(t.getUTCMinutes())}`;
+
+    const frames = [];
+    for (let i = 5; i >= 0; i--) {
+      const t = new Date(base.getTime() - i * 5 * 60000);
+      frames.push({ ts: fmt(t), date: t });
+    }
+    return frames; // oldest first
+  }
+
+  function initRadarMap() {
+    radarMap = L.map('radar-map', {
+      center: [LAT, LON],
+      zoom: 8,
+      zoomControl: true,
+      attributionControl: true
+    });
+
+    // Dark base: CartoDB Dark Matter
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      subdomains: 'abcd',
+      maxZoom: 13,
+      attribution: '&copy; <a href="https://carto.com/">CARTO</a> &copy; <a href="https://www.openstreetmap.org/">OSM</a>'
+    }).addTo(radarMap);
+
+    // 25-mile range ring (25 mi = 40,234 m)
+    L.circle([LAT, LON], {
+      radius: 40234,
+      color: '#38bdf8',
+      fill: false,
+      weight: 1,
+      opacity: 0.5,
+      dashArray: '5 5'
+    }).addTo(radarMap);
+
+    // Home pin
+    const homeIcon = L.divIcon({
+      html: '<div style="width:9px;height:9px;background:#38bdf8;border:2px solid #0f172a;border-radius:50%;box-shadow:0 0 5px #38bdf8;"></div>',
+      className: '',
+      iconSize: [9, 9],
+      iconAnchor: [4, 4]
+    });
+    L.marker([LAT, LON], { icon: homeIcon })
+      .bindTooltip('Alamo Township, MI', {
+        permanent: false,
+        direction: 'right',
+        className: 'radar-tooltip'
+      })
+      .addTo(radarMap);
+
+    loadRadarFrames();
+  }
+
+  function loadRadarFrames() {
+    // Tear down existing layers and animation
+    if (radarAnimInterval) clearInterval(radarAnimInterval);
+    radarLayers.forEach(l => radarMap.removeLayer(l));
+    radarLayers = [];
+
+    const frames = getRadarFrames();
+    radarFrameDates = frames.map(f => f.date);
+
+    frames.forEach((frame, i) => {
+      const layer = L.tileLayer(
+        `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-${frame.ts}/{z}/{x}/{y}.png`,
+        {
+          opacity: 0,
+          zIndex: 200 + i,
+          attribution: 'Radar: <a href="https://mesonet.agron.iastate.edu/">IEM</a>'
+        }
+      );
+      layer.addTo(radarMap);
+      radarLayers.push(layer);
+    });
+
+    currentFrame = 0;
+    startAnimation();
+  }
+
+  function startAnimation() {
+    // Show first frame immediately
+    if (radarLayers.length > 0) {
+      radarLayers[0].setOpacity(0.75);
+      updateRadarFooter();
+    }
+
+    radarAnimInterval = setInterval(() => {
+      radarLayers[currentFrame].setOpacity(0);
+      currentFrame = (currentFrame + 1) % radarLayers.length;
+      radarLayers[currentFrame].setOpacity(0.75);
+      updateRadarFooter();
+    }, 500);
+  }
+
+  function updateRadarFooter() {
+    const indicator = document.getElementById('radar-frame-indicator');
+    const tsEl      = document.getElementById('radar-timestamp');
+
+    if (indicator) indicator.textContent = `${currentFrame + 1} / ${radarLayers.length}`;
+
+    if (tsEl && radarFrameDates[currentFrame]) {
+      const t = radarFrameDates[currentFrame];
+      tsEl.textContent = t.toLocaleTimeString('en-US', {
+        hour: 'numeric', minute: '2-digit', timeZoneName: 'short'
+      });
+    }
   }
 
   // ── Main init ─────────────────────────────────────────────────────────────
@@ -496,16 +682,21 @@
     document.getElementById('timestamp').textContent =
       `Last checked: ${new Date().toLocaleString()}`;
 
-    // Fetch grid info (cached after first call) and alerts in parallel
     const [gridProps] = await Promise.all([
       fetchGridInfo(),
       fetchAlerts()
     ]);
 
-    // Fetch hourly forecast (needs grid data) then render timeline
     const periods = await fetchHourlyForecast(gridProps);
     renderTimeline(periods);
   }
+
+  // Radar initializes once; frames reload every 5 min independently
+  window.addEventListener('load', () => {
+    initRadarMap();
+    setInterval(() => { if (radarMap) loadRadarFrames(); }, 5 * 60 * 1000);
+    setTimeout(() => { if (radarMap) radarMap.invalidateSize(); }, 150);
+  });
 
   init();
   setInterval(init, 60000);
