@@ -568,7 +568,9 @@
   };
 
   function renderAlertPolygons() {
-    if (!radarMap) return;
+    // Retry if map isn't initialized yet — guards against the race where
+    // alert fetch completes before initRadarMap() has run.
+    if (!radarMap) { setTimeout(renderAlertPolygons, 200); return; }
 
     // Clear existing alert polygons
     alertPolyLayers.forEach(l => radarMap.removeLayer(l));
@@ -604,27 +606,6 @@
   }
 
   // ── Radar map ─────────────────────────────────────────────────────────────
-
-  // Build 6 UTC timestamps at 5-min intervals, oldest→newest
-  function getRadarFrames() {
-    const now = new Date();
-    const utcMin = Math.floor(now.getUTCMinutes() / 5) * 5;
-    const base = new Date(Date.UTC(
-      now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
-      now.getUTCHours(), utcMin, 0
-    ));
-    const pad = n => String(n).padStart(2, '0');
-    const fmt = t =>
-      `${t.getUTCFullYear()}${pad(t.getUTCMonth() + 1)}${pad(t.getUTCDate())}` +
-      `${pad(t.getUTCHours())}${pad(t.getUTCMinutes())}`;
-
-    const frames = [];
-    for (let i = 5; i >= 0; i--) {
-      const t = new Date(base.getTime() - i * 5 * 60000);
-      frames.push({ ts: fmt(t), date: t });
-    }
-    return frames; // oldest first
-  }
 
   function initRadarMap() {
     radarMap = L.map('radar-map', {
@@ -681,24 +662,39 @@
     loadRadarFrames();
   }
 
-  function loadRadarFrames() {
-    // Tear down existing layers and animation
+  // Fetch server-confirmed frame timestamps from RainViewer, then build tile layers.
+  // Using the API manifest avoids guessing timestamps that may not have tiles yet —
+  // the root cause of the blank radar with the old IEM timestamp-construction approach.
+  async function loadRadarFrames() {
     if (radarAnimInterval) clearInterval(radarAnimInterval);
     radarLayers.forEach(l => radarMap.removeLayer(l));
     radarLayers = [];
 
-    const frames = getRadarFrames();
-    radarFrameDates = frames.map(f => f.date);
+    let frames;
+    try {
+      const res = await fetch('https://api.rainviewer.com/public/weather-maps.json');
+      if (!res.ok) throw new Error(`RainViewer returned ${res.status}`);
+      const data = await res.json();
+      const host = data.host;
+      // Use last 6 of the past frames (oldest→newest for animation)
+      const past = data.radar.past.slice(-6);
+      frames = past.map(f => ({
+        url: `${host}${f.path}/256/{z}/{x}/{y}/6/1_1.png`,
+        date: new Date(f.time * 1000)
+      }));
+    } catch (err) {
+      console.warn('RainViewer manifest fetch failed:', err);
+      document.getElementById('radar-timestamp').textContent = 'Radar unavailable';
+      return;
+    }
 
+    radarFrameDates = frames.map(f => f.date);
     frames.forEach((frame, i) => {
-      const layer = L.tileLayer(
-        `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-${frame.ts}/{z}/{x}/{y}.png`,
-        {
-          opacity: 0,
-          zIndex: 200 + i,
-          attribution: 'Radar: <a href="https://mesonet.agron.iastate.edu/">IEM</a>'
-        }
-      );
+      const layer = L.tileLayer(frame.url, {
+        opacity: 0,
+        zIndex: 200 + i,
+        attribution: 'Radar: <a href="https://www.rainviewer.com/">RainViewer</a>'
+      });
       layer.addTo(radarMap);
       radarLayers.push(layer);
     });
@@ -750,12 +746,12 @@
     renderTimeline(periods);
   }
 
-  // Radar initializes once; frames reload every 5 min independently
-  window.addEventListener('load', () => {
-    initRadarMap();
-    setInterval(() => { if (radarMap) loadRadarFrames(); }, 5 * 60 * 1000);
-    setTimeout(() => { if (radarMap) radarMap.invalidateSize(); }, 150);
-  });
+  // Leaflet is synchronously loaded in <head>; script is at end of <body>,
+  // so DOM and Leaflet are both available here — no need for window.load.
+  // invalidateSize() is still deferred so flex layout dimensions are resolved.
+  initRadarMap();
+  setTimeout(() => radarMap && radarMap.invalidateSize(), 150);
+  setInterval(() => loadRadarFrames(), 5 * 60 * 1000);
 
   init();
   setInterval(init, 60000);
