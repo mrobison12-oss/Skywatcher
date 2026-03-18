@@ -204,6 +204,23 @@
       font-size: 12px;
     }
 
+    /* ── SPC Mesoscale Discussion cards ─────────────────────── */
+    .md-card { background: #1e293b; border-left: 3px solid #f59e0b; padding: 0.5rem 0.75rem; margin-bottom: 0.5rem; border-radius: 4px; }
+    .md-title { font-size: 12px; color: #f1f5f9; font-weight: bold; }
+    .md-label { font-size: 10px; color: #f59e0b; font-weight: normal; background: #2d1f00; padding: 1px 5px; border-radius: 3px; margin-left: 4px; }
+    .md-meta { font-size: 11px; color: #64748b; margin-top: 2px; }
+    .md-link { font-size: 11px; color: #38bdf8; text-decoration: none; display: inline-block; margin-top: 4px; }
+    .md-link:hover { text-decoration: underline; }
+
+    /* ── Status / All-Clear panel ────────────────────────────── */
+    .status-clear { background: #052e16; border-left: 4px solid #22c55e; padding: 0.75rem; border-radius: 4px; margin-bottom: 0.75rem; }
+    .status-alert { background: #1e293b; border-left: 4px solid #ef4444; padding: 0.75rem; border-radius: 4px; margin-bottom: 0.75rem; }
+    .status-icon { font-size: 16px; color: #22c55e; }
+    .status-label { font-size: 13px; font-weight: bold; color: #86efac; }
+    .status-sub { font-size: 11px; color: #64748b; margin-top: 3px; line-height: 1.4; }
+    .status-next { font-size: 11px; color: #94a3b8; margin-top: 4px; }
+    .status-ts { font-size: 10px; color: #475569; margin-top: 6px; }
+
     /* ── Error / Loading ─────────────────────────────────────── */
     .error {
       background: #2d1515; border-left: 4px solid #ef4444;
@@ -237,10 +254,12 @@
     <div class="timestamp" id="timestamp">Loading...</div>
   </div>
 
-  <!-- Left Column: Alerts -->
+  <!-- Left Column: Alerts + SPC Discussions -->
   <div class="col" id="col-alerts">
     <div class="col-header">Active Alerts</div>
     <div id="alerts" class="loading">Fetching alerts...</div>
+    <div class="col-header" style="margin-top:1rem">SPC Discussions</div>
+    <div id="spc-mds" class="loading" style="font-size:11px">Loading...</div>
   </div>
 
   <!-- Center Column: Radar Map -->
@@ -259,6 +278,10 @@
         <span class="label">Threat</span>
         <span class="value" id="threat-summary"><span class="loading">...</span></span>
       </div>
+      <div class="radar-meta-item">
+        <span class="label">SPC Day 1</span>
+        <span class="value" id="spc-outlook-meta"><span class="loading">...</span></span>
+      </div>
     </div>
 
     <div id="radar-map"></div>
@@ -268,13 +291,16 @@
         <span class="legend-swatch" style="background:#38bdf8;opacity:0.8"></span>&nbsp;Home
         &nbsp;&nbsp;
         <span class="legend-swatch" style="border:1px dashed #38bdf8;background:transparent"></span>&nbsp;25 mi
+        &nbsp;&nbsp;
+        <span id="spc-legend" style="display:contents"></span>
       </div>
       <div style="color:#475569;font-size:10px" id="radar-timestamp"></div>
     </div>
   </div>
 
-  <!-- Right Column: Threat Summary + Timeline -->
+  <!-- Right Column: Status Panel + Timeline -->
   <div class="col timeline-col" id="col-timeline">
+    <div id="status-panel" class="loading" style="font-size:11px">Loading...</div>
     <div class="col-header">24-Hour Threat Timeline</div>
     <div class="threat-bar" id="threat-bar" style="display:none"></div>
     <div id="timeline" class="loading">Fetching forecast...</div>
@@ -296,6 +322,22 @@
   let radarAnimInterval = null;
   let radarFrameDates = [];
   let alertPolyLayers = [];
+
+  // ── SPC state ──────────────────────────────────────────────────────────────
+  let spcLayer = null;
+  let spcLastIssue = null; // ISSUE_ISO of last-drawn outlook — skip redraw if unchanged
+
+  // ── SPC categorical risk styles (DN → display) ────────────────────────────
+  // DN codes: 0=no thunder, 2=general thunder, 3=marginal, 4=slight,
+  //           5=enhanced, 6=moderate, 8=high
+  const SPC_CAT = {
+    2: { fill: '#c1e9c1', stroke: '#8db88d', label: 'General Thunder', opacity: 0.22 },
+    3: { fill: '#66a366', stroke: '#3d703d', label: 'Marginal',         opacity: 0.28 },
+    4: { fill: '#f6f67a', stroke: '#b0b020', label: 'Slight',           opacity: 0.33 },
+    5: { fill: '#e7c580', stroke: '#b07020', label: 'Enhanced',         opacity: 0.38 },
+    6: { fill: '#e55c5c', stroke: '#a01010', label: 'Moderate',         opacity: 0.43 },
+    8: { fill: '#ff79ff', stroke: '#cc00cc', label: 'High',             opacity: 0.50 },
+  };
 
   // ── Point-in-polygon (Ray Casting) ────────────────────────────────────────
   function pointInPolygon(lat, lon, polygon) {
@@ -605,6 +647,203 @@
     }
   }
 
+  // ── SPC Convective Outlook (Day 1 categorical) ────────────────────────────
+  // Fetches the direct GeoJSON (no ZIP) from SPC. Cache-busted every 30 min
+  // to match SPC's update cadence. Skips redraw if ISSUE_ISO is unchanged.
+  async function fetchSpcOutlook() {
+    const metaEl = document.getElementById('spc-outlook-meta');
+    try {
+      const bust = Math.floor(Date.now() / 1800000); // changes every 30 min
+      const res = await fetch(
+        `https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson?_=${bust}`,
+        { headers: { 'User-Agent': NWS_USER_AGENT } }
+      );
+      if (!res.ok) throw new Error(`SPC GeoJSON ${res.status}`);
+      const geojson = await res.json();
+
+      const features = geojson.features || [];
+      const issueIso = features[0]?.properties?.ISSUE_ISO || null;
+
+      // Skip full redraw if data hasn't changed since last fetch
+      if (issueIso && issueIso === spcLastIssue && spcLayer) {
+        return;
+      }
+      spcLastIssue = issueIso;
+
+      // Remove previous layer
+      if (spcLayer) { radarMap.removeLayer(spcLayer); spcLayer = null; }
+
+      // Features with actual geometry and a renderable risk level (DN >= 2)
+      const riskFeatures = features.filter(f => {
+        const dn = f.properties?.DN;
+        if (!dn || dn < 2) return false;
+        const geo = f.geometry;
+        if (!geo) return false;
+        if (geo.type === 'GeometryCollection') return (geo.geometries?.length || 0) > 0;
+        return true;
+      });
+
+      if (riskFeatures.length === 0) {
+        if (metaEl) metaEl.innerHTML = '<span style="color:#86efac">No thunderstorms</span>';
+        updateSpcLegend([]);
+        return;
+      }
+
+      spcLayer = L.geoJSON(
+        { type: 'FeatureCollection', features: riskFeatures },
+        {
+          pane: 'spcPane',
+          style: f => {
+            const s = SPC_CAT[f.properties?.DN] || { fill: '#888', stroke: '#555', opacity: 0.2 };
+            return { color: s.stroke, fillColor: s.fill, fillOpacity: s.opacity, weight: 1, opacity: 0.8 };
+          },
+          onEachFeature: (f, layer) => {
+            const cat = SPC_CAT[f.properties?.DN];
+            layer.bindTooltip(`SPC: ${cat?.label || f.properties?.LABEL || 'Risk area'}`,
+              { sticky: true, className: 'radar-tooltip' });
+          },
+        }
+      ).addTo(radarMap);
+
+      // Update meta strip
+      const highestDN = Math.max(...riskFeatures.map(f => f.properties?.DN || 0));
+      const cat = SPC_CAT[highestDN];
+      const issued = issueIso ? new Date(issueIso) : null;
+      const forecaster = features[0]?.properties?.FORECASTER || '';
+      if (metaEl) {
+        metaEl.innerHTML =
+          `<strong style="color:${cat?.fill || '#94a3b8'}">${cat?.label || 'Active'}</strong>` +
+          (issued ? ` <span style="color:#64748b">· ${issued.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })}</span>` : '');
+      }
+      updateSpcLegend(riskFeatures);
+
+    } catch (err) {
+      console.warn('SPC outlook fetch failed:', err);
+      if (metaEl) metaEl.textContent = 'SPC unavailable';
+    }
+  }
+
+  function updateSpcLegend(riskFeatures) {
+    const el = document.getElementById('spc-legend');
+    if (!el) return;
+    if (riskFeatures.length === 0) { el.innerHTML = ''; return; }
+    const dns = [...new Set(riskFeatures.map(f => f.properties?.DN).filter(Boolean))].sort((a, b) => a - b);
+    el.innerHTML = dns.map(dn => {
+      const s = SPC_CAT[dn];
+      if (!s) return '';
+      return `&nbsp;<span class="legend-swatch" style="background:${s.fill};border:1px solid ${s.stroke}"></span>${s.label}`;
+    }).join('');
+  }
+
+  // ── SPC Mesoscale Discussions (RSS) ───────────────────────────────────────
+  // Parses the SPC RSS XML feed. Active MDs are individual <item> entries whose
+  // GUID contains /md/md#### (vs. the status-only item whose GUID has a date).
+  // pubDate is surfaced as relative age; items > 4h old are flagged as potentially stale.
+  async function fetchSpcRss() {
+    const el = document.getElementById('spc-mds');
+    if (!el) return;
+    try {
+      const res = await fetch('https://www.spc.noaa.gov/products/spcrss.xml',
+        { headers: { 'Cache-Control': 'no-cache', 'User-Agent': NWS_USER_AGENT } }
+      );
+      if (!res.ok) throw new Error(`SPC RSS ${res.status}`);
+      const text = await res.text();
+      const doc = new DOMParser().parseFromString(text, 'text/xml');
+      const allItems = [...doc.querySelectorAll('item')];
+
+      // Individual MDs have GUIDs matching /md/md#### (not just the date-keyed status item)
+      const mdItems = allItems.filter(item =>
+        /\/md\/md\d+/i.test(item.querySelector('guid')?.textContent || '')
+      );
+
+      renderMesoscaleDiscussions(el, mdItems);
+    } catch (err) {
+      console.warn('SPC RSS fetch failed:', err);
+      el.innerHTML = '<div style="color:#64748b;font-size:11px">MD feed unavailable</div>';
+    }
+  }
+
+  function renderMesoscaleDiscussions(el, mdItems) {
+    if (mdItems.length === 0) {
+      el.innerHTML = '<div style="color:#475569;font-size:11px">No MDs in effect</div>';
+      return;
+    }
+    el.innerHTML = mdItems.map(item => {
+      const title   = item.querySelector('title')?.textContent || 'SPC MD';
+      const link    = item.querySelector('link')?.textContent || '#';
+      const pubStr  = item.querySelector('pubDate')?.textContent;
+      const pubDate = pubStr ? new Date(pubStr) : null;
+      const mdNum   = title.match(/\d+/)?.[0] || '?';
+      const ageStr  = pubDate ? relativeTime(pubDate) : '';
+      const staleWarn = pubDate && ageOlderThan(pubDate, 4)
+        ? ' · <span style="color:#f59e0b">may be stale</span>' : '';
+
+      return `<div class="md-card">
+        <div class="md-title">MD #${mdNum} <span class="md-label">Pre-Watch Signal</span></div>
+        <div class="md-meta">${ageStr}${staleWarn}</div>
+        <a href="${link}" target="_blank" rel="noopener" class="md-link">View Discussion →</a>
+      </div>`;
+    }).join('');
+  }
+
+  // ── All-Clear / Status panel ───────────────────────────────────────────────
+  // Computed from already-fetched alert and forecast data — no new API call.
+  // Shows clear state with next risk hint, or active alert summary.
+  // Timestamp is always surfaced so user can judge data freshness.
+  function renderAllClearPanel(periods) {
+    const el = document.getElementById('status-panel');
+    if (!el) return;
+    const checkedAt = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+
+    if (activeAlerts.length === 0) {
+      let nextRisk = null;
+      if (periods) {
+        const risky = periods.find(p =>
+          (p.probabilityOfPrecipitation?.value >= 40) ||
+          /thunderstorm|t-storm/i.test(p.shortForecast || '')
+        );
+        if (risky) {
+          const t = new Date(risky.startTime);
+          nextRisk = `${t.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })} — ${risky.shortForecast}`;
+        }
+      }
+      el.innerHTML = `<div class="status-clear">
+        <span class="status-icon">✓</span> <span class="status-label">All Clear</span>
+        <div class="status-sub">No active NWS alerts for this location.</div>
+        ${nextRisk
+          ? `<div class="status-next">Next risk: <strong>${nextRisk}</strong></div>`
+          : `<div class="status-sub" style="margin-top:4px">No significant risk in next 24h.</div>`}
+        <div class="status-ts">Confirmed at ${checkedAt}</div>
+      </div>`;
+    } else {
+      const order = { warning: 0, watch: 1, advisory: 2 };
+      const highest = activeAlerts.reduce((acc, a) => {
+        const cls = alertClass(a.properties.event);
+        return (order[cls] ?? 3) < (order[acc] ?? 3) ? cls : acc;
+      }, 'advisory');
+      const colors = { warning: '#ef4444', watch: '#f59e0b', advisory: '#3b82f6' };
+      const color = colors[highest] || '#94a3b8';
+      el.innerHTML = `<div class="status-alert" style="border-left-color:${color}">
+        <div class="status-label" style="color:${color}">${activeAlerts.length} Active Alert${activeAlerts.length > 1 ? 's' : ''}</div>
+        <div class="status-sub">${activeAlerts.map(a => a.properties.event).join(' · ')}</div>
+        <div class="status-ts">As of ${checkedAt}</div>
+      </div>`;
+    }
+  }
+
+  // ── Time helpers ──────────────────────────────────────────────────────────
+  function relativeTime(date) {
+    const mins = Math.floor((Date.now() - date.getTime()) / 60000);
+    if (mins < 2) return 'Just issued';
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    return `${hrs}h ${mins % 60}m ago`;
+  }
+
+  function ageOlderThan(date, hours) {
+    return (Date.now() - date.getTime()) > hours * 3600000;
+  }
+
   // ── Radar map ─────────────────────────────────────────────────────────────
 
   function initRadarMap() {
@@ -614,6 +853,12 @@
       zoomControl: true,
       attributionControl: true
     });
+
+    // Custom pane for SPC outlook polygons: sits above tile layers (z-index 200)
+    // but below Leaflet's default overlayPane (z-index 400) where alert polys live.
+    // This keeps radar tiles visible on top of SPC fills, and alert polys on top of both.
+    radarMap.createPane('spcPane');
+    radarMap.getPane('spcPane').style.zIndex = 300;
 
     // Dark base: CartoDB Dark Matter (no labels — county overlay adds context)
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png', {
@@ -737,13 +982,16 @@
     document.getElementById('timestamp').textContent =
       `Last checked: ${new Date().toLocaleString()}`;
 
+    // NWS alerts and SPC RSS run in parallel; grid is needed before hourly forecast
     const [gridProps] = await Promise.all([
       fetchGridInfo(),
-      fetchAlerts()
+      fetchAlerts(),
+      fetchSpcRss(),    // ~60s refresh is fine — SPC RSS has ttl=1 (updates every minute)
     ]);
 
     const periods = await fetchHourlyForecast(gridProps);
     renderTimeline(periods);
+    renderAllClearPanel(periods); // computed from already-fetched alert and forecast data
   }
 
   // Leaflet is synchronously loaded in <head>; script is at end of <body>,
@@ -752,6 +1000,9 @@
   initRadarMap();
   setTimeout(() => radarMap && radarMap.invalidateSize(), 150);
   setInterval(() => loadRadarFrames(), 5 * 60 * 1000);
+
+  fetchSpcOutlook();                                  // on startup
+  setInterval(fetchSpcOutlook, 30 * 60 * 1000);      // every 30 min — matches SPC cadence
 
   init();
   setInterval(init, 60000);
